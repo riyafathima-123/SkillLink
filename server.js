@@ -8,6 +8,7 @@ import skillsRouter from "./routes/skills.js";
 import connectionsRouter from "./routes/connections.js";
 import creditsRouter from "./routes/credits.js";
 import matchmakingRouter from "./routes/matchmaking.js";
+import authRouter from "./routes/auth.js";
 
 // Import Supabase
 import { supabase } from "./db/supabaseClient.js";
@@ -44,6 +45,7 @@ app.use(
 
 // ===== ROUTES =====
 app.use("/api/users", usersRouter);
+app.use("/api/auth", authRouter);
 app.use("/api/skills", skillsRouter);
 app.use("/api/connections", connectionsRouter);
 app.use("/api/credits", creditsRouter);
