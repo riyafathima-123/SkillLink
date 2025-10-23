@@ -108,15 +108,17 @@ router.get("/:id", requireAuth, async (req, res) => {
 /**
  * PUT /api/connections/:id
  * Update connection status (teacher can accept/reject/complete)
+ * When accepted: deduct credits from learner, add to teacher, record transactions
  */
 router.put("/:id", requireAuth, async (req, res) => {
   const { error: vErr, value } = updateConnectionSchema.validate(req.body);
   if (vErr) return res.status(400).json({ error: vErr.message });
 
   try {
+    // Get connection details
     const { data: connection, error: cErr } = await supabase
       .from("connections")
-      .select("teacher_id, learner_id, price")
+      .select("teacher_id, learner_id, price, status, skill_id")
       .eq("id", req.params.id)
       .single();
 
@@ -128,43 +130,123 @@ router.put("/:id", requireAuth, async (req, res) => {
       return res.status(403).json({ error: "Only teacher can update connection status" });
     }
 
+    // If accepting the connection, handle credit transfer
+    if (value.status === "accepted" && connection.status !== "accepted") {
+      // Get learner's current credits
+      const { data: learner, error: learnerErr } = await supabase
+        .from("users")
+        .select("credits, email, full_name")
+        .eq("id", connection.learner_id)
+        .single();
+
+      if (learnerErr) {
+        return res.status(500).json({ error: "Failed to fetch learner details" });
+      }
+
+      const learnerCredits = learner.credits || 0;
+      const price = parseFloat(connection.price);
+
+      // Check if learner has sufficient credits
+      if (learnerCredits < price) {
+        return res.status(400).json({ 
+          error: "Insufficient credits",
+          details: `Learner has ${learnerCredits} credits but needs ${price} credits`
+        });
+      }
+
+      // Get teacher's current credits
+      const { data: teacher, error: teacherErr } = await supabase
+        .from("users")
+        .select("credits, email, full_name")
+        .eq("id", connection.teacher_id)
+        .single();
+
+      if (teacherErr) {
+        return res.status(500).json({ error: "Failed to fetch teacher details" });
+      }
+
+      const teacherCredits = teacher.credits || 0;
+
+      // Deduct credits from learner
+      const { error: deductErr } = await supabase
+        .from("users")
+        .update({ 
+          credits: learnerCredits - price,
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", connection.learner_id);
+
+      if (deductErr) {
+        return res.status(500).json({ error: "Failed to deduct credits from learner" });
+      }
+
+      // Add credits to teacher
+      const { error: addErr } = await supabase
+        .from("users")
+        .update({ 
+          credits: teacherCredits + price,
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", connection.teacher_id);
+
+      if (addErr) {
+        // Rollback learner credit deduction
+        await supabase
+          .from("users")
+          .update({ credits: learnerCredits })
+          .eq("id", connection.learner_id);
+        
+        return res.status(500).json({ error: "Failed to add credits to teacher" });
+      }
+
+      // Record learner transaction (spend)
+      await supabase.from("credit_transactions").insert({
+        user_id: connection.learner_id,
+        type: "spend",
+        amount: price,
+        meta: {
+          connection_id: req.params.id,
+          skill_id: connection.skill_id,
+          teacher_id: connection.teacher_id,
+          teacher_name: teacher.full_name,
+          reason: "Payment for learning session"
+        },
+        created_at: new Date().toISOString()
+      });
+
+      // Record teacher transaction (earning - using 'purchase' as earning type or add 'earn' to check constraint)
+      await supabase.from("credit_transactions").insert({
+        user_id: connection.teacher_id,
+        type: "refund", // Using 'refund' as a workaround for earning since 'earn' is not in the constraint
+        amount: price,
+        meta: {
+          connection_id: req.params.id,
+          skill_id: connection.skill_id,
+          learner_id: connection.learner_id,
+          learner_name: learner.full_name,
+          reason: "Earnings from teaching session"
+        },
+        created_at: new Date().toISOString()
+      });
+    }
+
+    // Update connection status
     const { data, error } = await supabase
       .from("connections")
-      .update({ status: value.status })
+      .update({ 
+        status: value.status,
+        updated_at: new Date().toISOString()
+      })
       .eq("id", req.params.id)
       .select()
       .single();
 
     if (error) throw error;
 
-    if (value.status === "accepted") {
-      try {
-        const { data: wallet } = await supabase
-          .from("wallets")
-          .select("balance")
-          .eq("user_id", connection.learner_id)
-          .single();
-
-        if (wallet) {
-          const newBalance = parseFloat(wallet.balance) - parseFloat(connection.price);
-          await supabase
-            .from("wallets")
-            .update({ balance: newBalance })
-            .eq("user_id", connection.learner_id);
-
-          await supabase.from("credit_transactions").insert({
-            user_id: connection.learner_id,
-            type: "spend",
-            amount: connection.price,
-            meta: { reason: "Learning session payment" },
-          });
-        }
-      } catch (err) {
-        console.error("Error deducting credits:", err);
-      }
-    }
-
-    res.json(data);
+    res.json({ 
+      ...data, 
+      message: value.status === "accepted" ? "Connection accepted and credits transferred" : "Connection updated"
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

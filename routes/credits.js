@@ -19,35 +19,21 @@ const spendSchema = Joi.object({
 
 /**
  * GET /api/credits/balance
- * Get current user's credit balance
+ * Get current user's credit balance from users table
  */
-router.get("/balance", async (req, res) => {
+router.get("/balance", requireAuth, async (req, res) => {
   try {
-    // Get user ID from token or use default
-    let userId = req.user?.id;
-    
-    // If no auth, return default balance for demo
-    if (!userId) {
-      return res.json({ balance: 100 });
-    }
-
-    const { data, error } = await supabase
-      .from("wallets")
-      .select("balance")
-      .eq("user_id", userId)
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("credits")
+      .eq("id", req.user.id)
       .single();
 
-    // If wallet doesn't exist, create it
-    if (error?.code === "PGRST116") {
-      await supabase.from("wallets").insert({
-        user_id: userId,
-        balance: 100,
-      });
-      return res.json({ balance: 100 });
+    if (error) {
+      return res.status(500).json({ error: "Failed to fetch balance" });
     }
 
-    if (error) throw error;
-    res.json({ balance: parseFloat(data.balance) || 100 });
+    res.json({ balance: user.credits || 0 });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -56,6 +42,7 @@ router.get("/balance", async (req, res) => {
 /**
  * POST /api/credits/purchase
  * Purchase credits (called after payment gateway success)
+ * Adds credits to user account
  */
 router.post("/purchase", requireAuth, async (req, res) => {
   const { error: vErr, value } = purchaseSchema.validate(req.body);
@@ -64,31 +51,38 @@ router.post("/purchase", requireAuth, async (req, res) => {
   try {
     const { amount, meta } = value;
 
-    // Create or get wallet
-    const { data: w, error: wErr } = await supabase
-      .from("wallets")
-      .upsert(
-        { user_id: req.user.id, balance: 0 },
-        { onConflict: "user_id" }
-      )
-      .select()
+    // Get current credits
+    const { data: user, error: userErr } = await supabase
+      .from("users")
+      .select("credits")
+      .eq("id", req.user.id)
       .single();
 
-    if (wErr) throw wErr;
+    if (userErr) {
+      return res.status(500).json({ error: "Failed to fetch user credits" });
+    }
 
-    // Increment balance
-    const newBalance = parseFloat(w.balance || 0) + parseFloat(amount);
-    await supabase
-      .from("wallets")
-      .update({ balance: newBalance, updated_at: new Date().toISOString() })
-      .eq("user_id", req.user.id);
+    const currentCredits = user.credits || 0;
+    const newBalance = currentCredits + parseFloat(amount);
+
+    // Update user credits
+    const { error: updateErr } = await supabase
+      .from("users")
+      .update({ 
+        credits: newBalance,
+        updated_at: new Date().toISOString() 
+      })
+      .eq("id", req.user.id);
+
+    if (updateErr) throw updateErr;
 
     // Record transaction
     await supabase.from("credit_transactions").insert({
       user_id: req.user.id,
       type: "purchase",
-      amount,
-      meta,
+      amount: parseFloat(amount),
+      meta: meta || {},
+      created_at: new Date().toISOString()
     });
 
     res.json({ ok: true, balance: newBalance });
@@ -108,35 +102,47 @@ router.post("/spend", requireAuth, async (req, res) => {
   try {
     const { amount, reason, meta } = value;
 
-    // Get current balance
-    const { data: w, error: wErr } = await supabase
-      .from("wallets")
-      .select("balance")
-      .eq("user_id", req.user.id)
+    // Get current credits
+    const { data: user, error: userErr } = await supabase
+      .from("users")
+      .select("credits")
+      .eq("id", req.user.id)
       .single();
 
-    let balance = 0;
-    if (wErr?.code !== "PGRST116" && wErr) throw wErr;
-    if (!wErr) balance = parseFloat(w.balance || 0);
+    if (userErr) {
+      return res.status(500).json({ error: "Failed to fetch user credits" });
+    }
+
+    const currentCredits = user.credits || 0;
 
     // Check sufficient balance
-    if (balance < amount) {
-      return res.status(400).json({ error: "Insufficient credits" });
+    if (currentCredits < amount) {
+      return res.status(400).json({ 
+        error: "Insufficient credits",
+        balance: currentCredits,
+        required: amount
+      });
     }
 
     // Deduct credits
-    const newBalance = balance - amount;
-    await supabase
-      .from("wallets")
-      .update({ balance: newBalance, updated_at: new Date().toISOString() })
-      .eq("user_id", req.user.id);
+    const newBalance = currentCredits - parseFloat(amount);
+    const { error: updateErr } = await supabase
+      .from("users")
+      .update({ 
+        credits: newBalance,
+        updated_at: new Date().toISOString() 
+      })
+      .eq("id", req.user.id);
+
+    if (updateErr) throw updateErr;
 
     // Record transaction
     await supabase.from("credit_transactions").insert({
       user_id: req.user.id,
       type: "spend",
-      amount,
+      amount: parseFloat(amount),
       meta: { ...meta, reason },
+      created_at: new Date().toISOString()
     });
 
     res.json({ ok: true, balance: newBalance });
@@ -147,23 +153,16 @@ router.post("/spend", requireAuth, async (req, res) => {
 
 /**
  * GET /api/credits/transactions
- * Get transaction history
+ * Get transaction history for current user
  */
-router.get("/transactions", async (req, res) => {
+router.get("/transactions", requireAuth, async (req, res) => {
   try {
-    // Get user ID from token or use default
-    let userId = req.user?.id;
-    
-    if (!userId) {
-      return res.json({ transactions: [] });
-    }
-
     const limit = parseInt(req.query.limit || "50");
 
     const { data, error } = await supabase
       .from("credit_transactions")
       .select("*")
-      .eq("user_id", userId)
+      .eq("user_id", req.user.id)
       .order("created_at", { ascending: false })
       .limit(limit);
 
