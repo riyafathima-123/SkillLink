@@ -15,7 +15,7 @@ const updateUserSchema = Joi.object({
  * GET /api/users/me
  * Get current authenticated user's profile
  */
-router.get("/me", requireAuth, async (req, res) => {
+router.get("/me",  async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("users")
