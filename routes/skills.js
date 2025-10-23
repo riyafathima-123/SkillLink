@@ -44,7 +44,7 @@ router.get("/", async (req, res) => {
  * POST /api/skills
  * Create a new skill (requires authentication)
  */
-router.post("/",  async (req, res) => {
+router.post("/", requireAuth, async (req, res) => {
   const { error: vErr, value } = skillSchema.validate(req.body);
   if (vErr) return res.status(400).json({ error: vErr.message });
 
